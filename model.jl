@@ -8,6 +8,8 @@ using Knet
 # rng: randomly sampled matrix
 
 
+include(Pkg.dir("Knet","examples","variational-autoencoder", "vae_mnist.jl"))
+
 function filterbank(gx, gx, sigma2, delta, A, B)
     rng = randn!(similar(mu))
     mu_x = compute_mu(gx, rng, delta)
@@ -66,6 +68,8 @@ function reconstruct(w,r,x,o)
         c = c .+ wt
         push!(cs, c)
     end
+
+    return mus, logsigmas, sigmas, cs
 end
 
 
@@ -73,6 +77,18 @@ function generate()
 end
 
 
-function loss(w,x,mus,sigmas,logsigmas,o)
-    xhat = sigm.(reconstruct)
+function loss(w,r,x,o)
+    A, B, T = o[:A], o[:B], o[:T]
+    mus, logsigmas, sigmas, cs = reconstruct(w, r, x, o)
+    xhat = sigm.(cs[end])
+    Lx = VAE.binary_cross_entropy(x, xhat) * A * B
+    Lz = 0
+    for t = 1:T
+        mu_2 = mus[t] * mus[t]
+        sigma_2 = sigmas[t] * sigmas[t]
+        logsigma = logsigmas[t]
+        Lz += 0.5 * sum(mu_2 * sigma_2-2logsigma, 1) - 0.5T
+    end
+    Lz = mean(Lz)
+    return Lx + Lz
 end
