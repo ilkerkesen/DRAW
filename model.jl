@@ -39,7 +39,16 @@ function compute_mu(g, rng, delta, N)
 end
 
 
-function qnet(henc)
+function att_window(w, hdec)
+end
+
+
+function qnet(w,henc)
+    mu = w[:wmu] * henc .+ w[:bmu]
+    logsigma = w[:wlogsigma] * henc .+ w[:blogsigma]
+    sigma = exp.(logsigma)
+    noise = randn!(similar(mu))
+    return mu .+ noise .* sigma
 end
 
 
@@ -50,7 +59,7 @@ function reconstruct(w,r,x,o)
     xhat = x - sigm(c)
     rt = draw_read(x, o)
     henc, cenc = rnnforw(r,w,rt; hy=true, cy=true)
-    z, mu, logsigma, sigma = qnet(henc)
+    z, mu, logsigma, sigma = qnet(w,henc)
     push!(mus, mu); push!(logsigmas, logsigma); push!(sigmas, sigma)
     hdec, cdec = rnnforw(r,w,z; hy=true, cy=true)
     wt = draw_write(hdec)
