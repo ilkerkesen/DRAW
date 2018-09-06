@@ -39,7 +39,30 @@ function compute_mu(g, rng, delta, N)
 end
 
 
-function att_window(w, hdec)
+function att_window(w, hdec, A, B)
+    params = w[:wparams] * hdec
+    gx_ = params[1]
+    gy_ = params[2]
+    logsigma2 = params[3]
+    logdelta = params[4]
+    loggamma = params[5]
+
+    gx = (A+1)/2*(gx_+1)
+    gy = (B+1)/2*(gy_+1)
+    delta = (max(A,B)-1)/(N-1) * exp.(logdelta)
+    sigma2 = exp(logsigma2)
+    gamma = exp(loggamma)
+
+    return filterbank(gx,gy,sigma2,delta),gamma
+end
+
+
+function att_read(w, x, xhat, hdec, A, B, N)
+    (Fx,Fy),gamma = self.att_window(w, hdec, A, B)
+    function filter_image(image, Fx, Fy, gamma)
+        Fxt = Fx'
+        # glimpse = Fy.
+    end
 end
 
 
@@ -59,7 +82,7 @@ function reconstruct(w,r,x,o)
     xhat = x - sigm(c)
     rt = draw_read(x, o)
     henc, cenc = rnnforw(r,w,rt; hy=true, cy=true)
-    z, mu, logsigma, sigma = qnet(w,henc)
+    z, mu, logsigma, sigma = qnet(w, henc)
     push!(mus, mu); push!(logsigmas, logsigma); push!(sigmas, sigma)
     hdec, cdec = rnnforw(r,w,z; hy=true, cy=true)
     wt = draw_write(hdec)
@@ -82,7 +105,23 @@ function reconstruct(w,r,x,o)
 end
 
 
-function generate()
+function generate(w,r,o)
+    cs = []
+    hdec = cdec = cprev = nothing
+    for t = 1:o[:nsteps]
+        z = convert(o[:atype], randn(o[:zdim], o[:batchsize]))
+        if t == 1
+            cprev = 0.0
+            hdec, cdec = rnnforw(r, w, z; hy=true, cy=true)
+        else
+            cprev = cs[end]
+            hdec, cdec = rnnforw(r, w, z, hdec, cdec)
+        end
+        push!(cs, cprev .+ att_write(hdec))
+    end
+
+    cs = map(x->sigm.(x), cs)
+    cs = map(x->convert(o[:atype], x), )
 end
 
 
