@@ -39,7 +39,7 @@ function compute_mu(g, rng, delta, N)
 end
 
 
-function att_window(w, hdec, A, B)
+function attn_window(w, hdec, A, B)
     params = w[:wparams] * hdec
     gx_ = params[1]
     gy_ = params[2]
@@ -57,12 +57,13 @@ function att_window(w, hdec, A, B)
 end
 
 
-function att_read(w, x, xhat, hdec, A, B, N)
-    (Fx,Fy),gamma = self.att_window(w, hdec, A, B)
-    function filter_image(image, Fx, Fy, gamma)
-        Fxt = Fx'
-        # glimpse = Fy.
-    end
+function attn_read(w, x, xhat, hdec, A, B, N)
+    vcat(x, xhat)
+end
+
+
+function attn_write(w, hdec)
+    w[:wattnw] * hdec .+ w[:battnw]
 end
 
 
@@ -117,7 +118,7 @@ function generate(w,r,o)
             cprev = cs[end]
             hdec, cdec = rnnforw(r, w, z, hdec, cdec)
         end
-        push!(cs, cprev .+ att_write(hdec))
+        push!(cs, cprev .+ attn_write(w,hdec))
     end
 
     cs = map(x->sigm.(x), cs)
