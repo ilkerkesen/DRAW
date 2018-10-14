@@ -4,7 +4,6 @@ import Base: push!, empty!
 
 _etype = Float32
 _atype = gpu() >= 0 ? KnetArray{_etype} : Array{_etype}
-@enum DrawMode RECONSTRUCT=1 GENERATE=2
 
 
 function initwb(input_dim::Int, output_dim::Int, atype=_atype)
@@ -79,7 +78,6 @@ function QNet(input_dim::Int, output_dim::Int, atype=_atype)
 end
 
 
-
 struct DRAWOutput
     mus
     logsigmas
@@ -93,7 +91,6 @@ DRAWOutput() = DRAWOutput([], [], [], [])
 function push!(o::DRAWOutput, c)
     push!(o.cs, c)
 end
-
 
 function push!(o::DRAWOutput, mu, logsigma, sigma, cs)
     push!(o.mus, mu)
@@ -121,6 +118,8 @@ struct DRAW
     qnetwork
     encoder
     decoder
+    encoder_hidden
+    decoder_hidden
 end
 
 
@@ -130,6 +129,8 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     qnetwork = QNet(encoder_dim, noise_dim, atype)
     encoder = RNN(input_dim, encoder_dim)
     decoder = RNN(input_dim, encoder_dim)
+    encoder_hidden = []
+    decoder_hidden = []
 
     return DRAW(
         A,
@@ -140,14 +141,76 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
         write_layer,
         qnetwork,
         encoder,
-        decoder
+        decoder.
+        encoder_hidden,
+        decoder_hidden
     )
 end
 
+function sample_noise(q::QNet, batchsize::Int)
+    zdim = size(q.mu_layer.w, 2)
+    z = randn(zdim, batchsize)
+    atype = typeof(q.mu_layer.w)
+    return convert(atype, z)
+end
 
-function (model::DRAW)(x; mode=RECONSTRUCT::DrawMode)
+
+function sample_noise(model::DRAW, batchsize::Int)
+    return sample_noise(model.qnetwork, batchsize)
+end
+
+
+# reconstruct
+function (model::DRAW)(x)
+    empty!(model.encoder_hidden)
+    empty!(model.decoder_hidden)
     output = DRAWOutput()
 
+    c = 0.0
+    for t = 1:model.T
+        # update xhat and then read
+        xhat = x - sigm.(c)
+        rt = model.read(x, xhat)
+
+        # encoder
+        model.encoder(rt; hidden=model.encoder_hidden)
+        henc, cenc = model.encoder_hidden
+
+        # qnetwork
+        z, mu, logsigma, sigma = model.qnetwork(henc)
+
+        # decoder
+        model.decoder(z; hidden=model.decoder_hidden)
+        hdec, cdec = model.decoder_hidden
+
+        # write and update draw output
+        wt = model.write_layer(hdec)
+        c = c .+ wt
+        push!(output, mu, logsigma, sigma, cs)
+    end
+    return output
+end
+
+
+# generate
+function (model::DRAW)(batchsize::Int)
+    empty!(model.encoder_hidden)
+    empty!(model.decoder_hidden)
+    output = DRAWOutput()
+    for t = 1:model.T
+        z = sample_noise(model, batchsize)
+        c = t == 1 ? 0.0 : cs[end]
+        model.decoder(z; hidden=hidden)
+        hdec, cdec = model.decoder_hidden
+        wt = model.write_layer(hdec)
+        c = c .+ wt
+        push!(output, c)
+    end
+    cs = map(x->sigm.(x), output.cs)
+    for i = 1:length(output.cs)
+        output.cs[i] = Array(output.cs[i])
+    end
+    return output
 end
 
 
@@ -157,9 +220,11 @@ function loss(model::DRAW, x)
     Lx = VAE.binary_cross_entropy(x, xhat) * model.A * model.B
     Lz = 0
     for t = 1:model.T
-        mu_2 = mus[t] .* mus[t]
-        sigma_2 = sigmas[t] .* sigmas[t]
-        logsigma = logsigmas[t]
-
+        mu_2 = output.mus[t] .* output.mus[t]
+        sigma_2 = output.sigmas[t] .* output.sigmas[t]
+        logsigma = output.logsigmas[t]
+        Lz += 0.5 * sum(mu_2 * sigma_2-2logsigma, 1) - 0.5 * model.T
     end
+    Lz = mean(Lz)
+    return Lx + Lz
 end
