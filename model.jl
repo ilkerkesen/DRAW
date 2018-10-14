@@ -1,4 +1,5 @@
 using Knet
+using ArgParse
 
 # terms
 # g, gx, gy: grid centers
@@ -57,12 +58,12 @@ function attn_window(w, hdec, A, B)
 end
 
 
-function attn_read(w, x, xhat, hdec, A, B, N)
+function draw_read(w, x, xhat, hdec, A, B, N)
     vcat(x, xhat)
 end
 
 
-function attn_write(w, hdec)
+function draw_write(w, hdec)
     w[:wattnw] * hdec .+ w[:battnw]
 end
 
@@ -76,8 +77,9 @@ function qnet(w,henc)
 end
 
 
-function reconstruct(w,r,x,o)
+function reconstruct(w, r, x, o)
     mus = []; logsigmas = []; sigmas = []; cs = []
+    A, B, T, N = o[:A], o[:B], o[:T], o[:N]
 
     c = 0.0
     xhat = x - sigm(c)
@@ -90,9 +92,9 @@ function reconstruct(w,r,x,o)
     c = c .+ wt
     push!(cs, c)
 
-    for t=2:o[:nsteps]
+    for t=2:o[:T]
         xhat = x - sigm(c)
-        rt = draw_read(x, xhat, hdec)
+        rt = draw_read(w, x, xhat, hdec, A, B, N)
         henc, cenc = rnnforw(r, w, rt, henc, cenc; hy=true, cy=true)
         z, mu, logsigma, sigma = qnet(henc)
         push!(mus, mu); push!(logsigmas, logsigma); push!(sigmas, sigma)
@@ -109,7 +111,7 @@ end
 function generate(w,r,o)
     cs = []
     hdec = cdec = cprev = nothing
-    for t = 1:o[:nsteps]
+    for t = 1:o[:T]
         z = convert(o[:atype], randn(o[:zdim], o[:batchsize]))
         if t == 1
             cprev = 0.0
@@ -118,7 +120,7 @@ function generate(w,r,o)
             cprev = cs[end]
             hdec, cdec = rnnforw(r, w, z, hdec, cdec)
         end
-        push!(cs, cprev .+ attn_write(w,hdec))
+        push!(cs, cprev .+ draw_write(w,hdec))
     end
 
     cs = map(x->sigm.(x), cs)
@@ -126,7 +128,7 @@ function generate(w,r,o)
 end
 
 
-function loss(w,r,x,o)
+function loss(w, r, x, o)
     A, B, T = o[:A], o[:B], o[:T]
     mus, logsigmas, sigmas, cs = reconstruct(w, r, x, o)
     xhat = sigm.(cs[end])
@@ -140,4 +142,49 @@ function loss(w,r,x,o)
     end
     Lz = mean(Lz)
     return Lx + Lz
+end
+
+
+function load_weights(w, o)
+
+end
+
+function main(args)
+    o = parse_options(args)
+    o[:seed] > 0 && Knet.setseed(o[:seed])
+
+    w = load_weights(w, o)
+end
+
+
+function parse_options(args)
+    s = ArgParseSettings()
+    s.description = "DRAW model on MNIST."
+
+    @add_arg_table s begin
+        ("--atype"; default=(gpu()>=0?"KnetArray{Float32}":"Array{Float32}");
+         help="array and float type to use")
+        ("--batchsize"; arg_type=Int; default=10; help="batch size")
+        ("--zdim"; arg_type=Int; default=100; help="noise dimension")
+        ("--hdim"; arg_type=Int; default=256; help="hidden units")
+        ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
+        ("--seed"; arg_type=Int; default=-1; help="random seed")
+        ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
+        ("--gridscale"; arg_type=Float64; default=2.0)
+        ("--optim"; default="Adam()")
+        ("--loadfile"; default=nothing; help="file to load trained models")
+        ("--outdir"; default=nothing; help="output dir for models/generations")
+        ("--T"; arg_type=Int; default=10)
+        ("--A"; arg_type=Int; default=28)
+        ("--B"; arg_type=Int; default=28)
+        ("--N"; arg_type=Int; default=5)
+    end
+
+    isa(args, AbstractString) && (args=split(args))
+    o = parse_args(args, s; as_symbols=true)
+    o[:atype] = eval(parse(o[:atype]))
+    if o[:outdir] != nothing
+        o[:outdir] = abspath(o[:outdir])
+    end
+    return o
 end
