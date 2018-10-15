@@ -1,5 +1,6 @@
 using Knet
 import Base: push!, empty!
+using Random
 
 
 _etype = Float32
@@ -19,7 +20,7 @@ struct Linear
 end
 
 
-(l::Linear)(x) = l.w * x .+ b
+(l::Linear)(x) = l.w * x .+ l.b
 
 
 function Linear(input_dim::Int, output_dim::Int, atype=_atype)
@@ -62,12 +63,12 @@ end
 
 
 function (l::QNet)(henc)
-    mu = mu_layer(henc)
-    logsigma = logsigma_layer(henc)
+    mu = l.mu_layer(henc)
+    logsigma = l.logsigma_layer(henc)
     sigma = exp.(logsigma)
     noise = randn!(similar(mu))
     sampled = mu .+ noise .* sigma
-    return (sampled, logsigma, sigma)
+    return (sampled, mu, logsigma, sigma)
 end
 
 
@@ -92,10 +93,11 @@ function push!(o::DRAWOutput, c)
     push!(o.cs, c)
 end
 
-function push!(o::DRAWOutput, mu, logsigma, sigma, cs)
+
+function push!(o::DRAWOutput, mu, logsigma, sigma, c)
     push!(o.mus, mu)
     push!(o.logsigmas, logsigma)
-    push!(o.sigma, sigma)
+    push!(o.sigmas, sigma)
     push!(o.cs, c)
 end
 
@@ -124,11 +126,12 @@ end
 
 
 function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
+    encoder_dim = A*B
     read_layer = Read()
     write_layer = Write(decoder_dim, A*B, atype)
     qnetwork = QNet(encoder_dim, noise_dim, atype)
-    encoder = RNN(A*B, encoder_dim)
-    decoder = RNN(A*B, decoder_dim)
+    encoder = RNN(2*N*N+decoder_dim, encoder_dim)
+    decoder = RNN(noise_dim, decoder_dim)
     encoder_hidden = []
     decoder_hidden = []
 
@@ -147,8 +150,9 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     )
 end
 
+
 function sample_noise(q::QNet, batchsize::Int)
-    zdim = size(q.mu_layer.w, 2)
+    zdim = size(value.(q.mu_layer.w), 2)
     z = randn(zdim, batchsize)
     atype = typeof(value.(q.mu_layer.w))
     return convert(atype, z)
@@ -165,16 +169,19 @@ function (model::DRAW)(x)
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
+    atype = typeof(value.(model.qnetwork.mu_layer.w))
 
     c = 0.0
+    hdec = atype(zeros(model.decoder.hiddenSize, size(x,2)))
     for t = 1:model.T
         # update xhat and then read
         xhat = x .- sigm.(c)
         rt = model.read_layer(x, xhat)
 
         # encoder
-        model.encoder(rt; hidden=model.encoder_hidden)
+        model.encoder(vcat(rt, hdec); hidden=model.encoder_hidden)
         henc, cenc = model.encoder_hidden
+        henc = reshape(henc, size(henc)[1:2])
 
         # qnetwork
         z, mu, logsigma, sigma = model.qnetwork(henc)
@@ -182,11 +189,12 @@ function (model::DRAW)(x)
         # decoder
         model.decoder(z; hidden=model.decoder_hidden)
         hdec, cdec = model.decoder_hidden
+        hdec = reshape(hdec, size(hdec)[1:2])
 
         # write and update draw output
         wt = model.write_layer(hdec)
         c = c .+ wt
-        push!(output, mu, logsigma, sigma, cs)
+        push!(output, mu, logsigma, sigma, c)
     end
     return output
 end
@@ -199,9 +207,10 @@ function (model::DRAW)(batchsize::Int)
     output = DRAWOutput()
     for t = 1:model.T
         z = sample_noise(model, batchsize)
-        c = t == 1 ? 0.0 : cs[end]
+        c = t == 1 ? 0.0 : output.cs[end]
         model.decoder(z; hidden=model.decoder_hidden)
         hdec, cdec = model.decoder_hidden
+        hdec = reshape(hdec, size(hdec)[1:2])
         wt = model.write_layer(hdec)
         c = c .+ wt
         push!(output, c)
