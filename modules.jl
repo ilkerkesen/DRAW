@@ -1,14 +1,15 @@
 using Knet
 import Base: push!, empty!
-using Random
+using Statistics, Random
+import Knet: params, train!
 
 
-_etype = Float32
+_etype = gpu() >= 0 ? Float32 : Float64
 _atype = gpu() >= 0 ? KnetArray{_etype} : Array{_etype}
 
 
 function initwb(input_dim::Int, output_dim::Int, atype=_atype)
-    w = param(output_dim, input_dim; init=randn, atype=_atype)
+    w = param(output_dim, input_dim; init=xavier, atype=_atype)
     b = param(output_dim, 1; atype=_atype)
     return (w,b)
 end
@@ -151,6 +152,12 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
 end
 
 
+function DRAW(N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
+    A = B = N
+    return DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
+end
+
+
 function sample_noise(q::QNet, batchsize::Int)
     zdim = size(value.(q.mu_layer.w), 2)
     z = randn(zdim, batchsize)
@@ -215,25 +222,49 @@ function (model::DRAW)(batchsize::Int)
         c = c .+ wt
         push!(output, c)
     end
-    cs = map(x->sigm.(x), output.cs)
+
     for i = 1:length(output.cs)
-        output.cs[i] = Array(output.cs[i])
+        output.cs[i] = Array(sigm.(output.cs[i]))
     end
     return output
 end
 
 
+function binary_cross_entropy(x, x̂)
+    F = _etype
+    s = @. x * log(x̂ + F(1e-10)) + (1-x) * log(1 - x̂ + F(1e-10))
+    return -mean(s)
+end
+
+
 function loss(model::DRAW, x)
     output = model(x)
-    xhat = sigm.(cs[end])
-    Lx = VAE.binary_cross_entropy(x, xhat) * model.A * model.B
-    Lz = 0
+    xhat = sigm.(output.cs[end])
+    Lx = binary_cross_entropy(x, xhat) * model.A * model.B
+    Lz = 0.0
     for t = 1:model.T
         mu_2 = output.mus[t] .* output.mus[t]
         sigma_2 = output.sigmas[t] .* output.sigmas[t]
         logsigma = output.logsigmas[t]
-        Lz += 0.5 * sum(mu_2 * sigma_2-2logsigma, 1) - 0.5 * model.T
+        Lz = Lz .+ 0.5 * sum(mu_2 .* sigma_2-2logsigma, dims=1) .- 0.5 * model.T
     end
     Lz = mean(Lz)
     return Lx + Lz
+end
+
+
+function init_opt!(model::DRAW, optimizer="Adam()")
+    for par in params(model)
+        par.opt = eval(Meta.parse(optimizer))
+    end
+end
+
+
+function train!(model::DRAW, x)
+    J = @diff loss(model, x)
+    for par in params(model)
+        g = grad(J, par)
+        update!(value(par), g, par.opt)
+    end
+    return J
 end
