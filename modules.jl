@@ -1,7 +1,15 @@
 using Knet
-import Base: push!, empty!
+import Knet: Knet, minibatch, params, train!
+
+using Images
+using ArgParse
+using ImageMagick
+using JLD2
+
 using Statistics, Random
-import Knet: params, train!
+import Base: push!, empty!
+
+include(Knet.dir("data","mnist.jl"))
 
 
 _etype = gpu() >= 0 ? Float32 : Float64
@@ -47,14 +55,14 @@ function FullyConnected(
 end
 
 
-struct Read
+struct ReadNoAttention
 end
 
 
-(l::Read)(x, xhat) = vcat(x, xhat)
+(l::ReadNoAttention)(x, xhat, hdec) = vcat(x, xhat)
 
 
-Write = Linear
+WriteNoAttention = Linear
 
 
 struct QNet
@@ -80,12 +88,21 @@ function QNet(input_dim::Int, output_dim::Int, atype=_atype)
 end
 
 
-struct DRAWOutput
+function sample_noise(q::QNet, batchsize::Int)
+    zdim = size(value.(q.mu_layer.w), 2)
+    z = randn(zdim, batchsize)
+    atype = typeof(value.(q.mu_layer.w))
+    return convert(atype, z)
+end
+
+
+mutable struct DRAWOutput
     mus
     logsigmas
     sigmas
     cs
 end
+
 
 DRAWOutput() = DRAWOutput([], [], [], [])
 
@@ -111,7 +128,7 @@ function empty!(o::DRAWOutput)
 end
 
 
-struct DRAW
+mutable struct DRAW
     A
     B
     N
@@ -123,18 +140,21 @@ struct DRAW
     decoder
     encoder_hidden
     decoder_hidden
+    state0
 end
 
 
 function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     encoder_dim = A*B
-    read_layer = Read()
-    write_layer = Write(decoder_dim, A*B, atype)
+    read_layer = ReadNoAttention()
+    write_layer = WriteNoAttention(decoder_dim, A*B, atype)
     qnetwork = QNet(encoder_dim, noise_dim, atype)
     encoder = RNN(2*N*N+decoder_dim, encoder_dim)
     decoder = RNN(noise_dim, decoder_dim)
     encoder_hidden = []
     decoder_hidden = []
+    # dummy_state = atype(zeros(decoder.hiddenSize, 1))
+    dummy_state = zeros(decoder.hiddenSize, 1)
 
     return DRAW(
         A,
@@ -147,7 +167,8 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
         encoder,
         decoder,
         encoder_hidden,
-        decoder_hidden
+        decoder_hidden,
+        dummy_state
     )
 end
 
@@ -155,19 +176,6 @@ end
 function DRAW(N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     A = B = N
     return DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
-end
-
-
-function sample_noise(q::QNet, batchsize::Int)
-    zdim = size(value.(q.mu_layer.w), 2)
-    z = randn(zdim, batchsize)
-    atype = typeof(value.(q.mu_layer.w))
-    return convert(atype, z)
-end
-
-
-function sample_noise(model::DRAW, batchsize::Int)
-    return sample_noise(model.qnetwork, batchsize)
 end
 
 
@@ -179,11 +187,11 @@ function (model::DRAW)(x)
     atype = typeof(value.(model.qnetwork.mu_layer.w))
 
     c = 0.0
-    hdec = atype(zeros(model.decoder.hiddenSize, size(x,2)))
+    hdec = get_hdec(model, x)
     for t = 1:model.T
         # update xhat and then read
         xhat = x .- sigm.(c)
-        rt = model.read_layer(x, xhat)
+        rt = model.read_layer(x, xhat, hdec)
 
         # encoder
         model.encoder(vcat(rt, hdec); hidden=model.encoder_hidden)
@@ -230,6 +238,19 @@ function (model::DRAW)(batchsize::Int)
 end
 
 
+function get_hdec(model::DRAW, x)
+    h = model.state0
+    batchsize = size(x, 2)
+    h = h .+ fill!(similar(value(h), length(h), batchsize), 0)
+    return h
+end
+
+
+function sample_noise(model::DRAW, batchsize::Int)
+    return sample_noise(model.qnetwork, batchsize)
+end
+
+
 function binary_cross_entropy(x, x̂)
     F = _etype
     s = @. x * log(x̂ + F(1e-10)) + (1-x) * log(1 - x̂ + F(1e-10))
@@ -266,5 +287,88 @@ function train!(model::DRAW, x)
         g = grad(J, par)
         update!(value(par), g, par.opt)
     end
-    return J
+    return value(J)
+end
+
+
+function epoch!(model::DRAW, data)
+    atype = typeof(value.(model.qnetwork.mu_layer.w))
+    lossval = 0.0
+    iter = 0
+    for (x, y) in data
+        J = train!(model, atype(reshape(x, 784, size(x,4))))
+        lossval += J
+        iter += 1
+    end
+    return lossval/iter
+end
+
+
+function validate(model::DRAW, data)
+    atype = typeof(value.(model.qnetwork.mu_layer.w))
+    lossval = 0.0
+    iter = 0
+    for (x, y) in data
+        J = loss(model, atype(reshape(x, 784, size(x,4))))
+        lossval += J
+        iter += 1
+    end
+    return lossval/iter
+end
+
+
+function parse_options(args)
+    s = ArgParseSettings()
+    s.description = "DRAW model on MNIST."
+
+    @add_arg_table s begin
+        # ("--atype"; default=(gpu()>=0 ? "KnetArray{Float32}" : "Array{Float32}");
+        #  help="array and float type to use")
+        ("--batchsize"; arg_type=Int; default=50; help="batch size")
+        ("--zdim"; arg_type=Int; default=100; help="noise dimension")
+        ("--encoder_dim"; arg_type=Int; default=128; help="hidden units")
+        ("--decoder_dim"; arg_type=Int; default=128; help="hidden units")
+        ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
+        ("--seed"; arg_type=Int; default=-1; help="random seed")
+        ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
+        ("--gridscale"; arg_type=Float64; default=2.0)
+        ("--optim"; default="Adam()")
+        ("--loadfile"; default=nothing; help="file to load trained models")
+        ("--outdir"; default=nothing; help="output dir for models/generations")
+        ("--A"; arg_type=Int; default=28)
+        ("--B"; arg_type=Int; default=28)
+        ("--N"; arg_type=Int; default=28)
+        ("--T"; arg_type=Int; default=10)
+    end
+
+    isa(args, AbstractString) && (args=split(args))
+    o = parse_args(args, s; as_symbols=true)
+    # o[:atype] = eval(parse(o[:atype]))
+    if o[:outdir] != nothing
+        o[:outdir] = abspath(o[:outdir])
+    end
+    return o
+end
+
+
+function main(args)
+    o = parse_options(args)
+    o[:seed] > 0 && Knet.setseed(o[:seed])
+
+    model = DRAW(
+        o[:A], o[:B], o[:N], o[:T], o[:encoder_dim],
+        o[:decoder_dim], o[:zdim])
+    init_opt!(model, o[:optim])
+    dtrn,dtst = mnistdata(xtype=Array{Float32})
+
+    bestloss = Inf
+    for epoch = 1:o[:epochs]
+        trnloss = epoch!(model, dtrn)
+        tstloss = validate(model, dtst)
+        datetime = now()
+        @show datetime, epoch, trnloss, tstloss
+        if tstloss < bestloss
+            bestloss = tstloss
+        end
+    end
 end
