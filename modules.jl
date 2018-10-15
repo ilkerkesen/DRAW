@@ -127,8 +127,8 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     read_layer = Read()
     write_layer = Write(decoder_dim, A*B, atype)
     qnetwork = QNet(encoder_dim, noise_dim, atype)
-    encoder = RNN(input_dim, encoder_dim)
-    decoder = RNN(input_dim, encoder_dim)
+    encoder = RNN(A*B, encoder_dim)
+    decoder = RNN(A*B, decoder_dim)
     encoder_hidden = []
     decoder_hidden = []
 
@@ -141,7 +141,7 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
         write_layer,
         qnetwork,
         encoder,
-        decoder.
+        decoder,
         encoder_hidden,
         decoder_hidden
     )
@@ -150,7 +150,7 @@ end
 function sample_noise(q::QNet, batchsize::Int)
     zdim = size(q.mu_layer.w, 2)
     z = randn(zdim, batchsize)
-    atype = typeof(q.mu_layer.w)
+    atype = typeof(value.(q.mu_layer.w))
     return convert(atype, z)
 end
 
@@ -169,8 +169,8 @@ function (model::DRAW)(x)
     c = 0.0
     for t = 1:model.T
         # update xhat and then read
-        xhat = x - sigm.(c)
-        rt = model.read(x, xhat)
+        xhat = x .- sigm.(c)
+        rt = model.read_layer(x, xhat)
 
         # encoder
         model.encoder(rt; hidden=model.encoder_hidden)
@@ -200,7 +200,7 @@ function (model::DRAW)(batchsize::Int)
     for t = 1:model.T
         z = sample_noise(model, batchsize)
         c = t == 1 ? 0.0 : cs[end]
-        model.decoder(z; hidden=hidden)
+        model.decoder(z; hidden=model.decoder_hidden)
         hdec, cdec = model.decoder_hidden
         wt = model.write_layer(hdec)
         c = c .+ wt
