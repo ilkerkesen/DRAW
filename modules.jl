@@ -6,7 +6,7 @@ using ArgParse
 using ImageMagick
 using JLD2
 
-using Statistics, Random
+using Statistics, Random, Dates
 import Base: push!, empty!
 
 include(Knet.dir("data","mnist.jl"))
@@ -154,7 +154,7 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     encoder_hidden = []
     decoder_hidden = []
     # dummy_state = atype(zeros(decoder.hiddenSize, 1))
-    dummy_state = zeros(decoder.hiddenSize, 1)
+    dummy_state = atype(zeros(decoder.hiddenSize, 1))
 
     return DRAW(
         A,
@@ -184,7 +184,7 @@ function (model::DRAW)(x)
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
-    atype = typeof(value.(model.qnetwork.mu_layer.w))
+    atype = typeof(value(model.qnetwork.mu_layer.w))
 
     c = 0.0
     hdec = get_hdec(model, x)
@@ -262,14 +262,17 @@ function loss(model::DRAW, x)
     output = model(x)
     xhat = sigm.(output.cs[end])
     Lx = binary_cross_entropy(x, xhat) * model.A * model.B
+    kl_terms = []
     Lz = 0.0
     for t = 1:model.T
         mu_2 = output.mus[t] .* output.mus[t]
         sigma_2 = output.sigmas[t] .* output.sigmas[t]
         logsigma = output.logsigmas[t]
-        Lz = Lz .+ 0.5 * sum(mu_2 .* sigma_2-2logsigma, dims=1) .- 0.5 * model.T
+        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5
+        push!(kl_terms, kl)
     end
-    Lz = mean(Lz)
+    kl_sum = reduce(+, kl_terms)
+    Lz = mean(kl_sum)
     return Lx + Lz
 end
 
@@ -292,7 +295,7 @@ end
 
 
 function epoch!(model::DRAW, data)
-    atype = typeof(value.(model.qnetwork.mu_layer.w))
+    atype = typeof(value(model.qnetwork.mu_layer.w))
     lossval = 0.0
     iter = 0
     for (x, y) in data
@@ -305,7 +308,7 @@ end
 
 
 function validate(model::DRAW, data)
-    atype = typeof(value.(model.qnetwork.mu_layer.w))
+    atype = typeof(value(model.qnetwork.mu_layer.w))
     lossval = 0.0
     iter = 0
     for (x, y) in data
@@ -325,14 +328,14 @@ function parse_options(args)
         # ("--atype"; default=(gpu()>=0 ? "KnetArray{Float32}" : "Array{Float32}");
         #  help="array and float type to use")
         ("--batchsize"; arg_type=Int; default=50; help="batch size")
-        ("--zdim"; arg_type=Int; default=100; help="noise dimension")
-        ("--encoder_dim"; arg_type=Int; default=128; help="hidden units")
-        ("--decoder_dim"; arg_type=Int; default=128; help="hidden units")
+        ("--zdim"; arg_type=Int; default=10; help="noise dimension")
+        ("--encoder_dim"; arg_type=Int; default=256; help="hidden units")
+        ("--decoder_dim"; arg_type=Int; default=256; help="hidden units")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
         ("--gridscale"; arg_type=Float64; default=2.0)
-        ("--optim"; default="Adam()")
+        ("--optim"; default="Adam(;beta1=0.5, gclip=5.0)")
         ("--loadfile"; default=nothing; help="file to load trained models")
         ("--outdir"; default=nothing; help="output dir for models/generations")
         ("--A"; arg_type=Int; default=28)
