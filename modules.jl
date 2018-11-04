@@ -9,6 +9,7 @@ using JLD2
 using Statistics, Random, Dates
 import Base: push!, empty!
 
+
 include(Knet.dir("data","mnist.jl"))
 
 
@@ -16,8 +17,19 @@ _etype = gpu() >= 0 ? Float32 : Float64
 _atype = gpu() >= 0 ? KnetArray{_etype} : Array{_etype}
 
 
-function initwb(input_dim::Int, output_dim::Int, atype=_atype)
-    w = param(output_dim, input_dim; init=xavier, atype=_atype)
+square(x) = x .* x
+
+
+function urand(output, input)
+    dim = input
+    max_value = sqrt(3/dim)
+    min_value = -max_value
+    w = min_value .+ rand(output, input) .* (max_value-min_value)
+end
+
+
+function initwb(input_dim::Int, output_dim::Int, atype=_atype, init=urand)
+    w = param(output_dim, input_dim; init=init, atype=_atype)
     b = param(output_dim, 1; atype=_atype)
     return (w,b)
 end
@@ -32,8 +44,8 @@ end
 (l::Linear)(x) = l.w * x .+ l.b
 
 
-function Linear(input_dim::Int, output_dim::Int, atype=_atype)
-    w, b = initwb(input_dim, output_dim, atype)
+function Linear(input_dim::Int, output_dim::Int, atype=_atype, init=urand)
+    w, b = initwb(input_dim, output_dim, atype, init)
     return Linear(w, b)
 end
 
@@ -49,8 +61,8 @@ end
 
 
 function FullyConnected(
-    input_dim::Int, output_dim::Int, activate=relu, atype=_atype)
-    w, b = initwb(input_dim, output_dim, atype)
+    input_dim::Int, output_dim::Int, activate=relu, atype=_atype, init=urand)
+    w, b = initwb(input_dim, output_dim, atype, init)
     return FullyConnected(w, b, activate)
 end
 
@@ -75,23 +87,23 @@ function (l::QNet)(henc)
     mu = l.mu_layer(henc)
     logsigma = l.logsigma_layer(henc)
     sigma = exp.(logsigma)
-    noise = randn!(similar(mu))
+    noise = randn!(similar(mu)) # FIXME
     sampled = mu .+ noise .* sigma
     return (sampled, mu, logsigma, sigma)
 end
 
 
-function QNet(input_dim::Int, output_dim::Int, atype=_atype)
-    mu_layer = Linear(input_dim, output_dim, atype)
-    logsigma_layer = Linear(input_dim, output_dim, atype)
+function QNet(input_dim::Int, output_dim::Int, atype=_atype, init=urand)
+    mu_layer = Linear(input_dim, output_dim, atype, init)
+    logsigma_layer = Linear(input_dim, output_dim, atype, init)
     return QNet(mu_layer, logsigma_layer)
 end
 
 
 function sample_noise(q::QNet, batchsize::Int)
-    zdim = size(value.(q.mu_layer.w), 2)
+    zdim = size(value(q.mu_layer.w), 2)
     z = randn(zdim, batchsize)
-    atype = typeof(value.(q.mu_layer.w))
+    atype = typeof(value(q.mu_layer.w))
     return convert(atype, z)
 end
 
@@ -145,16 +157,15 @@ end
 
 
 function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
-    encoder_dim = A*B
+    imgsize = A*B
     read_layer = ReadNoAttention()
-    write_layer = WriteNoAttention(decoder_dim, A*B, atype)
-    qnetwork = QNet(encoder_dim, noise_dim, atype)
-    encoder = RNN(2*N*N+decoder_dim, encoder_dim)
+    write_layer = WriteNoAttention(decoder_dim, imgsize, atype)
+    qnetwork = QNet(decoder_dim, noise_dim, atype)
+    encoder = RNN(2imgsize+decoder_dim, encoder_dim) # FIXME: adapt to attn
     decoder = RNN(noise_dim, decoder_dim)
     encoder_hidden = []
     decoder_hidden = []
-    # dummy_state = atype(zeros(decoder.hiddenSize, 1))
-    dummy_state = atype(zeros(decoder.hiddenSize, 1))
+    state0 = atype(zeros(decoder.hiddenSize, 1))
 
     return DRAW(
         A,
@@ -168,7 +179,7 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
         decoder,
         encoder_hidden,
         decoder_hidden,
-        dummy_state
+        state0
     )
 end
 
@@ -180,17 +191,17 @@ end
 
 
 # reconstruct
-function (model::DRAW)(x)
+function (model::DRAW)(x; cprev=_atype(zeros(size(x))))
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
     atype = typeof(value(model.qnetwork.mu_layer.w))
 
-    c = 0.0
     hdec = get_hdec(model, x)
+    push!(model.decoder_hidden, hdec, hdec)
     for t = 1:model.T
         # update xhat and then read
-        xhat = x .- sigm.(c)
+        xhat = x - sigm.(cprev)
         rt = model.read_layer(x, xhat, hdec)
 
         # encoder
@@ -207,9 +218,9 @@ function (model::DRAW)(x)
         hdec = reshape(hdec, size(hdec)[1:2])
 
         # write and update draw output
-        wt = model.write_layer(hdec)
-        c = c .+ wt
+        c = cprev + model.write_layer(hdec)
         push!(output, mu, logsigma, sigma, c)
+        cprev = output.cs[end]
     end
     return output
 end
@@ -253,26 +264,26 @@ end
 
 function binary_cross_entropy(x, x̂)
     F = _etype
-    s = @. x * log(x̂ + F(1e-10)) + (1-x) * log(1 - x̂ + F(1e-10))
+    s = @. x * log(x̂ + F(1e-8)) + (1-x) * log(1 - x̂ + F(1e-8))
     return -mean(s)
 end
 
 
-function loss(model::DRAW, x)
+function loss(model::DRAW, x; loss_values=[])
     output = model(x)
     xhat = sigm.(output.cs[end])
     Lx = binary_cross_entropy(x, xhat) * model.A * model.B
     kl_terms = []
-    Lz = 0.0
     for t = 1:model.T
-        mu_2 = output.mus[t] .* output.mus[t]
-        sigma_2 = output.sigmas[t] .* output.sigmas[t]
+        mu_2 = square(output.mus[t])
+        sigma_2 = square(output.sigmas[t])
         logsigma = output.logsigmas[t]
-        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5
+        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5 # FIXME: dimension kontrol
         push!(kl_terms, kl)
     end
-    kl_sum = reduce(+, kl_terms)
+    kl_sum = reduce(+, kl_terms) # == sum(kl_terms)
     Lz = mean(kl_sum)
+    push!(loss_values, value.(Lx), value.(Lz))
     return Lx + Lz
 end
 
@@ -285,38 +296,52 @@ end
 
 
 function train!(model::DRAW, x)
-    J = @diff loss(model, x)
+    values = []
+    J = @diff loss(model, x; loss_values=values)
     for par in params(model)
         g = grad(J, par)
         update!(value(par), g, par.opt)
     end
-    return value(J)
+    return (sum(values), values[1], values[2])
 end
 
 
 function epoch!(model::DRAW, data)
     atype = typeof(value(model.qnetwork.mu_layer.w))
-    lossval = 0.0
+    Lx = Lz = 0.0
     iter = 0
     for (x, y) in data
-        J = train!(model, atype(reshape(x, 784, size(x,4))))
-        lossval += J
+        # @show iter
+        # flush(stdout)
+        J1, J2 = train!(model, atype(reshape(x, 784, size(x,4))))
+        Lx += J1
+        Lz += J2
         iter += 1
+
+        if (iter-1) % 100 == 0
+            println("iter=$iter, Lx=$(Lx/iter), Lz=$(Lz/iter)")
+        end
     end
-    return lossval/iter
+    lossval = Lx+Lz
+    return lossval/iter, Lx/iter, Lz/iter
 end
 
 
 function validate(model::DRAW, data)
     atype = typeof(value(model.qnetwork.mu_layer.w))
-    lossval = 0.0
+    Lx = Lz = 0.0
     iter = 0
+    values = []
     for (x, y) in data
-        J = loss(model, atype(reshape(x, 784, size(x,4))))
-        lossval += J
+        loss(model, atype(reshape(x, 784, size(x,4))); loss_values=values)
+        J1, J2 = values
+        Lx += J1
+        Lz += J2
         iter += 1
+        empty!(values)
     end
-    return lossval/iter
+    lossval = Lx + Lz
+    return lossval/iter, Lx/iter, Lz/iter
 end
 
 
@@ -355,14 +380,19 @@ end
 
 
 function main(args)
+    println("script started"); flush(stdout)
     o = parse_options(args)
-    o[:seed] > 0 && Knet.setseed(o[:seed])
+    o[:seed] > 0 && Knet.seed!(o[:seed])
+    println("options parsed"); flush(stdout)
 
     model = DRAW(
         o[:A], o[:B], o[:N], o[:T], o[:encoder_dim],
         o[:decoder_dim], o[:zdim])
+    println("model initialized"); flush(stdout)
     init_opt!(model, o[:optim])
-    dtrn,dtst = mnistdata(xtype=Array{Float32})
+    println("optimization parameters initiazlied"); flush(stdout)
+    dtrn, dtst = mnistdata(xtype=Array{Float32})
+    println("data loaded"); flush(stdout)
 
     bestloss = Inf
     for epoch = 1:o[:epochs]
@@ -370,8 +400,10 @@ function main(args)
         tstloss = validate(model, dtst)
         datetime = now()
         @show datetime, epoch, trnloss, tstloss
-        if tstloss < bestloss
-            bestloss = tstloss
+        flush(stdout)
+        if tstloss[1] < bestloss
+            bestloss = tstloss[1]
         end
     end
+    return model
 end
