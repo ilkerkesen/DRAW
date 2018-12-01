@@ -28,14 +28,20 @@ function urand(output, input)
 end
 
 
-function initwb(input_dim::Int, output_dim::Int, atype=_atype, init=urand)
+function myinit(output, input)
+    stdv = 1 / sqrt(input)
+    w = stdv * (2rand(output, input) .- 1)
+end
+
+
+function initwb(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
     w = param(output_dim, input_dim; init=init, atype=_atype)
     b = param(output_dim, 1; atype=_atype)
     return (w,b)
 end
 
 
-struct Linear
+mutable struct Linear
     w
     b
 end
@@ -44,7 +50,7 @@ end
 (l::Linear)(x) = l.w * x .+ l.b
 
 
-function Linear(input_dim::Int, output_dim::Int, atype=_atype, init=urand)
+function Linear(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
     w, b = initwb(input_dim, output_dim, atype, init)
     return Linear(w, b)
 end
@@ -61,7 +67,7 @@ end
 
 
 function FullyConnected(
-    input_dim::Int, output_dim::Int, activate=relu, atype=_atype, init=urand)
+    input_dim::Int, output_dim::Int, activate=relu, atype=_atype, init=myinit)
     w, b = initwb(input_dim, output_dim, atype, init)
     return FullyConnected(w, b, activate)
 end
@@ -87,13 +93,13 @@ function (l::QNet)(henc)
     mu = l.mu_layer(henc)
     logsigma = l.logsigma_layer(henc)
     sigma = exp.(logsigma)
-    noise = randn!(similar(mu)) # FIXME
+    noise = randn!(similar(mu))
     sampled = mu .+ noise .* sigma
     return (sampled, mu, logsigma, sigma)
 end
 
 
-function QNet(input_dim::Int, output_dim::Int, atype=_atype, init=urand)
+function QNet(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
     mu_layer = Linear(input_dim, output_dim, atype, init)
     logsigma_layer = Linear(input_dim, output_dim, atype, init)
     return QNet(mu_layer, logsigma_layer)
@@ -161,8 +167,8 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     read_layer = ReadNoAttention()
     write_layer = WriteNoAttention(decoder_dim, imgsize, atype)
     qnetwork = QNet(decoder_dim, noise_dim, atype)
-    encoder = RNN(2imgsize+decoder_dim, encoder_dim) # FIXME: adapt to attn
-    decoder = RNN(noise_dim, decoder_dim)
+    encoder = RNN(2imgsize+decoder_dim, encoder_dim; winit=myinit) # FIXME: adapt to attn
+    decoder = RNN(noise_dim, decoder_dim; winit=myinit)
     encoder_hidden = []
     decoder_hidden = []
     state0 = atype(zeros(decoder.hiddenSize, 1))
@@ -198,6 +204,7 @@ function (model::DRAW)(x; cprev=_atype(zeros(size(x))))
     atype = typeof(value(model.qnetwork.mu_layer.w))
 
     hdec = get_hdec(model, x)
+    hdec = reshape(hdec, size(hdec,1), size(hdec,2), 1)
     push!(model.decoder_hidden, hdec, hdec)
     for t = 1:model.T
         # update xhat and then read
@@ -311,8 +318,6 @@ function epoch!(model::DRAW, data)
     Lx = Lz = 0.0
     iter = 0
     for (x, y) in data
-        # @show iter
-        # flush(stdout)
         J1, J2 = train!(model, atype(reshape(x, 784, size(x,4))))
         Lx += J1
         Lz += J2
@@ -384,6 +389,7 @@ function main(args)
     o = parse_options(args)
     o[:seed] > 0 && Knet.seed!(o[:seed])
     println("options parsed"); flush(stdout)
+    display(o)
 
     model = DRAW(
         o[:A], o[:B], o[:N], o[:T], o[:encoder_dim],
