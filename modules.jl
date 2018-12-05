@@ -167,8 +167,8 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
     read_layer = ReadNoAttention()
     write_layer = WriteNoAttention(decoder_dim, imgsize, atype)
     qnetwork = QNet(decoder_dim, noise_dim, atype)
-    encoder = RNN(2imgsize+decoder_dim, encoder_dim; winit=myinit) # FIXME: adapt to attn
-    decoder = RNN(noise_dim, decoder_dim; winit=myinit)
+    encoder = RNN(2imgsize+decoder_dim, encoder_dim) # FIXME: adapt to attn
+    decoder = RNN(noise_dim, decoder_dim)
     encoder_hidden = []
     decoder_hidden = []
     state0 = atype(zeros(decoder.hiddenSize, 1))
@@ -285,7 +285,7 @@ function loss(model::DRAW, x; loss_values=[])
         mu_2 = square(output.mus[t])
         sigma_2 = square(output.sigmas[t])
         logsigma = output.logsigmas[t]
-        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5 # FIXME: dimension kontrol
+        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5*model.T # FIXME: dimension kontrol
         push!(kl_terms, kl)
     end
     kl_sum = reduce(+, kl_terms) # == sum(kl_terms)
