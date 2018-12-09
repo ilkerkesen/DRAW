@@ -204,8 +204,8 @@ function (model::DRAW)(x; cprev=_atype(zeros(size(x))))
     atype = typeof(value(model.qnetwork.mu_layer.w))
 
     hdec = get_hdec(model, x)
-    hdec = reshape(hdec, size(hdec,1), size(hdec,2), 1)
-    push!(model.decoder_hidden, hdec, hdec)
+    hinit = reshape(hdec, size(hdec,1), size(hdec,2), 1)
+    push!(model.decoder_hidden, hinit, hinit)
     for t = 1:model.T
         # update xhat and then read
         xhat = x - sigm.(cprev)
@@ -322,10 +322,6 @@ function epoch!(model::DRAW, data)
         Lx += J1
         Lz += J2
         iter += 1
-
-        if (iter-1) % 100 == 0
-            println("iter=$iter, Lx=$(Lx/iter), Lz=$(Lz/iter)")
-        end
     end
     lossval = Lx+Lz
     return lossval/iter, Lx/iter, Lz/iter
@@ -404,12 +400,20 @@ function main(args)
     for epoch = 1:o[:epochs]
         trnloss = epoch!(model, dtrn)
         tstloss = validate(model, dtst)
-        datetime = now()
-        @show datetime, epoch, trnloss, tstloss
-        flush(stdout)
+        report(epoch, trnloss, tstloss)
         if tstloss[1] < bestloss
             bestloss = tstloss[1]
         end
     end
     return model
+end
+
+
+function report(epoch, trn, tst)
+    trnloss, trnLx, trnLz = trn
+    tstloss, tstLx, tstLz = tst
+    datetime = now()
+    print("epoch=$epoch, trn=$trnloss (Lx=$trnLx, Lz=$trnLz)")
+    println(", tst=$tstloss (Lx=$tstLx, Lz=$tstLz)")
+    flush(stdout)
 end
