@@ -10,6 +10,8 @@ using Statistics, Random, Dates
 import Base: push!, empty!
 
 
+SEED = -1
+
 include(Knet.dir("data","mnist.jl"))
 
 
@@ -93,7 +95,12 @@ function (l::QNet)(henc)
     mu = l.mu_layer(henc)
     logsigma = l.logsigma_layer(henc)
     sigma = exp.(logsigma)
-    noise = randn!(similar(mu))
+    if SEED == -1
+        noise = randn!(similar(mu))
+    else
+        rng = MersenneTwister(SEED)
+        noise = randn!(rng, similar(mu))
+    end
     sampled = mu .+ noise .* sigma
     return (sampled, mu, logsigma, sigma)
 end
@@ -108,7 +115,12 @@ end
 
 function sample_noise(q::QNet, batchsize::Int)
     zdim = size(value(q.mu_layer.w), 2)
-    z = randn(zdim, batchsize)
+    if SEED == -1
+        z = randn(zdim, batchsize)
+    else
+        rng = MersenneTwister(SEED)
+        z = randn(rng, zdim, batchsize)
+    end
     atype = typeof(value(q.mu_layer.w))
     return convert(atype, z)
 end
