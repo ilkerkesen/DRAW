@@ -365,7 +365,7 @@ function parse_options(args)
     @add_arg_table s begin
         # ("--atype"; default=(gpu()>=0 ? "KnetArray{Float32}" : "Array{Float32}");
         #  help="array and float type to use")
-        ("--batchsize"; arg_type=Int; default=50; help="batch size")
+        ("--batchsize"; arg_type=Int; default=64; help="batch size")
         ("--zdim"; arg_type=Int; default=10; help="noise dimension")
         ("--encoder_dim"; arg_type=Int; default=256; help="hidden units")
         ("--decoder_dim"; arg_type=Int; default=256; help="hidden units")
