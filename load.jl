@@ -71,7 +71,7 @@ bih = myread(PREFIX, SUFFIX, "decoder.bias_ih")
 bhh = myread(PREFIX, SUFFIX, "decoder.bias_hh")
 decoder_w = torch2knet(wih, bih, whh, bhh)
 
-mu_w = myread(PREFIX, SUFFIX, "mu_lienar.weight")' .+ 0
+mu_w = myread(PREFIX, SUFFIX, "mu_linear.weight")' .+ 0
 mu_b = myread(PREFIX, SUFFIX, "mu_linear.bias")' .+ 0
 
 sigma_w = myread(PREFIX, SUFFIX, "sigma_linear.weight")' .+ 0

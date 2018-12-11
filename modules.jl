@@ -98,8 +98,8 @@ function (l::QNet)(henc)
     if SEED == -1
         noise = randn!(similar(mu))
     else
-        rng = MersenneTwister(SEED)
-        noise = randn!(rng, similar(mu))
+        Knet.seed!(SEED)
+        noise = randn!(similar(mu))
     end
     sampled = mu .+ noise .* sigma
     return (sampled, mu, logsigma, sigma)
@@ -118,8 +118,8 @@ function sample_noise(q::QNet, batchsize::Int)
     if SEED == -1
         z = randn(zdim, batchsize)
     else
-        rng = MersenneTwister(SEED)
-        z = randn(rng, zdim, batchsize)
+        Knet.seed!(SEED)
+        z = randn(zdim, batchsize)
     end
     atype = typeof(value(q.mu_layer.w))
     return convert(atype, z)
