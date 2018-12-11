@@ -113,8 +113,8 @@ function QNet(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
 end
 
 
-function sample_noise(q::QNet, batchsize::Int)
-    zdim = size(value(q.mu_layer.w), 2)
+function sample_noise(q::QNet, batchsize::Int; generation=false)
+    zdim = size(value(q.mu_layer.w), !generation ? 2 : 1)
     if SEED == -1
         z = randn(zdim, batchsize)
     else
@@ -277,7 +277,7 @@ end
 
 
 function sample_noise(model::DRAW, batchsize::Int)
-    return sample_noise(model.qnetwork, batchsize)
+    return sample_noise(model.qnetwork, batchsize; generation=true)
 end
 
 
