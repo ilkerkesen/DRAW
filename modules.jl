@@ -93,7 +93,9 @@ end
 
 function (l::AttentionWindow)(hdec)
     params = l.linear(hdec)
-    gx, gy, logsigma2, logdelta, loggamma = map(i->params[i,:], size(params,1))
+    hsize, batchsize = size(params)
+    gx, gy, logsigma2, logdelta, loggamma = map(
+        i->reshape(params[i, :], 1, batchsize) , 1:hsize)
     gx = ((l.A + 1) / 2) .* (gx .+ 1)
     gy = ((l.B + 1) / 2) .* (gy .+ 1)
     delta = (max(l.A, l.B) - 1) / (l.N - 1) .* exp.(logdelta)
@@ -112,20 +114,20 @@ end
 
 
 function filterbank(gx, gy, sigma2, delta, A, B, N)
-    atype = typeof(gx) <: KnetArray ? KnetArray : Array
+    atype = typeof(value(gx)) <: KnetArray ? KnetArray : Array
     etype = eltype(gx)
     batchsize = size(gx, 2)
 
-    rng = atype{etype}(1:N)
+    rng = reshape(atype{etype}(0:N-1), N, 1)
     mu_x = compute_mu(gx, rng, delta, N)
     mu_y = compute_mu(gy, rng, delta, N)
 
-    a = reshape(atype{etype}(1:A), 1, 1, A)
-    b = reshape(atype{etype}(1:B), 1, 1, B)
+    a = reshape(atype{etype}(1:A), A, 1, 1)
+    b = reshape(atype{etype}(1:B), B, 1, 1)
 
     mu_x = reshape(mu_x, 1, size(mu_x)...)
     mu_y = reshape(mu_y, 1, size(mu_y)...)
-    sig2 = reshape(sigma2, 1, 1, length(sig2))
+    sig2 = reshape(sigma2, 1, 1, length(sigma2))
 
     Fx = filterbank_matrices(a, mu_x, sig2)
     Fy = filterbank_matrices(b, mu_y, sig2)
@@ -143,22 +145,19 @@ end
 
 
 function compute_mu(g, rng, delta, N)
-    batchsize = size(g, 2)
-    rng_t = hcat(map(i->rng, 1:batchsize)...)
-    # g_t = vcat(map(i->delta, 1:N)..)
-    # delta_t = vcat(map(i->delta, 1:N)...)
-    tmp = (rng_t .- 0.5 .* (1+N)) .* delta
-    mu = tmp + g
+    tmp = (rng .- 0.5 .* (1+N)) .* delta
+    mu = tmp .+ g
 end
 
 
 function filter_image(image, Fx, Fy, gamma, A, B, N)
     batchsize = size(image, 2)
-    Fxt = permutedims(Fx, (2,1,3))
-    img = reshape(img, A, B, batchsize)
-    glimpse = bmm(Fy, bmm(img, Fxt))
+    Fxt = permutedims(Fx, (2, 1, 3))
+    img = reshape(image, A, B, batchsize)
+    glimpse = bmm(bmm(Fxt, img), Fy)
     glimpse = reshape(glimpse, N, N, batchsize)
-    return glimpse .* gamma
+    out = glimpse .* reshape(gamma, 1, 1, batchsize)
+    out = reshape(out, div(length(out), batchsize), batchsize)
 end
 
 
@@ -182,14 +181,14 @@ mutable struct WriteAttention
 end
 
 
-function (l::WriteAttention)(Fx, Fy, gamma, hdec)
+function (l::WriteAttention)(hdec)
     A, B, N = l.window.A, l.window.B, l.window.N
     batchsize = size(hdec, 2)
     w = l.linear(hdec)
     w = reshape(w, N, N, batchsize)
     Fx, Fy, gamma = l.window(hdec)
-    Fyt = permutedims(Fy, 2, 1, 3)
-    wr = bmm(Fyt, bmm(w, Fx))
+    Fyt = permutedims(Fy, (2, 1, 3))
+    wr = bmm(bmm(Fx, w), Fyt)
     wr = reshape(wr, A*B, batchsize)
     return wr ./ gamma
 end
@@ -252,17 +251,22 @@ end
 
 
 function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
-              embed=0, nclass=10, atype=_atype, attention=true)
+              embed=0, nclass=10, atype=_atype, read_attn=true, write_attn=true)
     imgsize = A*B
 
-    window = attention ? AttentionWindow(decoder_dim, A, B, N) : nothing
-    read_layer = attention ? ReadAttention(window) : ReadNoAttention()
+    window = nothing
+    if read_attn || write_attn
+        window = AttentionWindow(decoder_dim, A, B, N; atype=atype)
+    end
+
+    read_layer = read_attn ? ReadAttention(window) : ReadNoAttention()
     write_layer =
-        if attention
+        if write_attn
             WriteAttention(window, decoder_dim, N; atype=atype)
         else
             WriteNoAttention(decoder_dim, imgsize; atype=atype)
         end
+
     embed_layer = embed == 0 ? nothing : Embedding(nclass, embed; atype=atype)
     qnetwork = QNet(decoder_dim, noise_dim, atype)
     encoder = RNN(2imgsize+decoder_dim, encoder_dim; dataType=_etype) # FIXME: adapt to attn
@@ -291,10 +295,10 @@ end
 
 
 function DRAW(N, T, encoder_dim, decoder_dim, noise_dim;
-              embed=0, nclass=10, atype=_atype)
+              embed=0, nclass=10, atype=_atype, read_attn=true, write_atnn=true)
     A = B = N
-    return DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
-                embed=embed, atype=_atype)
+    DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
+         embed=embed, atype=_atype, read_attn=read_attn, write_attn=write_attn)
 end
 
 
@@ -434,11 +438,14 @@ function epoch!(model::DRAW, data)
     atype = typeof(value(model.qnetwork.mu_layer.w))
     Lx = Lz = 0.0
     iter = 0
-    for (x, y) in data
+    @time for (x, y) in data
         J1, J2 = train!(model, atype(reshape(x, 784, size(x,4))), y)
         Lx += J1
         Lz += J2
         iter += 1
+        if iter % 100 == 0 || iter == 1
+            println("#$iter: Lx, Lz = $(Lx/iter), $(Lz/iter)")
+        end
     end
     lossval = Lx+Lz
     return lossval/iter, Lx/iter, Lz/iter
@@ -463,6 +470,19 @@ function validate(model::DRAW, data)
 end
 
 
+function mnistgrid(images, nrow, filename=nothing)
+    yy = reshape(images, 28, 28, 1, size(images)[end])
+    yy = permutedims(yy, (2,1,3,4))
+    yy = Images.imresize(yy, 40, 40)
+    yy = Gray.(mosaicview(yy, 0.5, nrow=nrow, npad=1, rowmajor=true))
+    if filename == nothing
+        display(yy)
+    else
+        save(filename, yy)
+    end
+end
+
+
 function parse_options(args)
     s = ArgParseSettings()
     s.description = "DRAW model on MNIST."
@@ -484,9 +504,9 @@ function parse_options(args)
         ("--outdir"; default=nothing; help="output dir for models/generations")
         ("--A"; arg_type=Int; default=28)
         ("--B"; arg_type=Int; default=28)
-        ("--N"; arg_type=Int; default=28)
+        ("--N"; arg_type=Int; default=5)
         ("--T"; arg_type=Int; default=10)
-
+        ("--valid"; action=:store_true)
     end
 
     isa(args, AbstractString) && (args=split(args))
@@ -518,7 +538,7 @@ function main(args)
     bestloss = Inf
     for epoch = 1:o[:epochs]
         trnloss = epoch!(model, dtrn)
-        tstloss = validate(model, dtst)
+        tstloss = o[:valid] ? validate(model, dtst) : (.0, .0, .0)
         report(epoch, trnloss, tstloss)
         if tstloss[1] < bestloss
             bestloss = tstloss[1]
@@ -528,11 +548,9 @@ function main(args)
 end
 
 
-function report(epoch, trn, tst)
-    trnloss, trnLx, trnLz = trn
-    tstloss, tstLx, tstLz = tst
-    datetime = now()
-    print("epoch=$epoch, trn=$trnloss (Lx=$trnLx, Lz=$trnLz)")
-    println(", tst=$tstloss (Lx=$tstLx, Lz=$tstLz)")
+function report(epoch, trn, tst=nothing)
+    print("[$(now())] epoch=$epoch, trn=$trn")
+    if tst != nothing; println(", tst=$tst")
+    else; println(); end
     flush(stdout)
 end
