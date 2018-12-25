@@ -92,13 +92,13 @@ end
 
 
 function (l::AttentionWindow)(hdec)
-    params = l.linear(hdec)
-    hsize, batchsize = size(params)
+    ps = l.linear(hdec)
+    hsize, batchsize = size(ps)
     gx, gy, logsigma2, logdelta, loggamma = map(
-        i->reshape(params[i, :], 1, batchsize) , 1:hsize)
-    gx = ((l.A + 1) / 2) .* (gx .+ 1)
-    gy = ((l.B + 1) / 2) .* (gy .+ 1)
-    delta = (max(l.A, l.B) - 1) / (l.N - 1) .* exp.(logdelta)
+        i->reshape(ps[i, :], 1, batchsize) , 1:hsize)
+    gx = div(l.A+1, 2) .* (gx .+ 1)
+    gy = div(l.B+1, 2) .* (gy .+ 1)
+    delta = div(max(l.A, l.B) - 1, (l.N - 1)) .* exp.(logdelta)
     sigma2 = exp.(logsigma2)
     gamma = exp.(loggamma)
 
@@ -122,8 +122,8 @@ function filterbank(gx, gy, sigma2, delta, A, B, N)
     mu_x = compute_mu(gx, rng, delta, N)
     mu_y = compute_mu(gy, rng, delta, N)
 
-    a = reshape(atype{etype}(1:A), A, 1, 1)
-    b = reshape(atype{etype}(1:B), B, 1, 1)
+    a = reshape(atype{etype}(0:A-1), A, 1, 1)
+    b = reshape(atype{etype}(0:B-1), B, 1, 1)
 
     mu_x = reshape(mu_x, 1, size(mu_x)...)
     mu_y = reshape(mu_y, 1, size(mu_y)...)
@@ -145,14 +145,13 @@ end
 
 
 function compute_mu(g, rng, delta, N)
-    tmp = (rng .- 0.5 .* (1+N)) .* delta
+    tmp = (rng .- 0.5 .- div(N, 2)) .* delta
     mu = tmp .+ g
 end
 
 
-function filter_image(image, Fx, Fy, gamma, A, B, N)
+function filter_image(image, Fxt, Fy, gamma, A, B, N)
     batchsize = size(image, 2)
-    Fxt = permutedims(Fx, (2, 1, 3))
     img = reshape(image, A, B, batchsize)
     glimpse = bmm(bmm(Fxt, img), Fy)
     glimpse = reshape(glimpse, N, N, batchsize)
@@ -169,8 +168,9 @@ end
 function (l::ReadAttention)(x, xhat, hdec)
     Fx, Fy, gamma = l.window(hdec)
     A, B, N = l.window.A, l.window.B, l.window.N
-    xnew = filter_image(x, Fx, Fy, gamma, A, B, N)
-    xhatnew = filter_image(xhat, Fx, Fy, gamma, A, B, N)
+    Fxt = permutedims(Fx, (2, 1, 3))
+    xnew = filter_image(x, Fxt, Fy, gamma, A, B, N)
+    xhatnew = filter_image(xhat, Fxt, Fy, gamma, A, B, N)
     return vcat(xnew, xhatnew)
 end
 
@@ -260,16 +260,16 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
     end
 
     read_layer = read_attn ? ReadAttention(window) : ReadNoAttention()
-    write_layer =
-        if write_attn
-            WriteAttention(window, decoder_dim, N; atype=atype)
-        else
-            WriteNoAttention(decoder_dim, imgsize; atype=atype)
-        end
+    write_layer = nothing
+    if write_attn
+        write_layer = WriteAttention(window, decoder_dim, N; atype=atype)
+    else
+        write_layer = WriteNoAttention(decoder_dim, imgsize; atype=atype)
+    end
 
     embed_layer = embed == 0 ? nothing : Embedding(nclass, embed; atype=atype)
     qnetwork = QNet(decoder_dim, noise_dim, atype)
-    encoder = RNN(2imgsize+decoder_dim, encoder_dim; dataType=_etype) # FIXME: adapt to attn
+    encoder = RNN(2*N*N+decoder_dim, encoder_dim; dataType=_etype) # FIXME: adapt to attn
     decoder = RNN(noise_dim+embed, decoder_dim; dataType=_etype)
     encoder_hidden = []
     decoder_hidden = []
@@ -406,7 +406,7 @@ function loss(model::DRAW, x, y=nothing; loss_values=[])
         mu_2 = square(output.mus[t])
         sigma_2 = square(output.sigmas[t])
         logsigma = output.logsigmas[t]
-        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5# *model.T # FIXME: dimension kontrol
+        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5 * model.T # FIXME: dimension kontrol
         push!(kl_terms, kl)
     end
     kl_sum = reduce(+, kl_terms) # == sum(kl_terms)
