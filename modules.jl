@@ -1,5 +1,6 @@
 using Knet
 import Knet: Knet, minibatch, params, train!
+using Sloth
 
 using Images
 using ArgParse
@@ -23,64 +24,14 @@ _atype = gpu() >= 0 ? KnetArray{_etype} : Array{_etype}
 square(x) = x .* x
 
 
-function urand(output, input)
-    dim = input
-    max_value = sqrt(3/dim)
-    min_value = -max_value
-    w = min_value .+ rand(output, input) .* (max_value-min_value)
-end
-
-
-function myinit(output, input)
-    stdv = 1 / sqrt(input)
-    w = stdv * (2rand(output, input) .- 1)
-end
-
-
-function initwb(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
-    w = param(output_dim, input_dim; init=init, atype=_atype)
-    b = param(output_dim, 1; atype=_atype)
-    return (w,b)
-end
-
-
-mutable struct Linear
-    w
-    b
-end
-
-
-(l::Linear)(x) = l.w * x .+ l.b
-
-
-function Linear(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
-    w, b = initwb(input_dim, output_dim, atype, init)
-    return Linear(w, b)
-end
-
-
-struct FullyConnected
-    w
-    b
-    activate
-end
-
-
-(l::FullyConnected)(x) = activate.(l.w * x .+ l.b)
-
-
-function FullyConnected(
-    input_dim::Int, output_dim::Int, activate=relu, atype=_atype, init=myinit)
-    w, b = initwb(input_dim, output_dim, atype, init)
-    return FullyConnected(w, b, activate)
-end
-
-
 struct ReadNoAttention
 end
 
 
-(l::ReadNoAttention)(x, xhat, hdec) = vcat(x, xhat)
+function (l::ReadNoAttention)(x, xhat, hdec;
+                              Fx=nothing, Fy=nothing, gamma=nothing)
+    vcat(x, xhat)
+end
 
 
 WriteNoAttention = Linear
@@ -107,9 +58,9 @@ function (l::QNet)(henc)
 end
 
 
-function QNet(input_dim::Int, output_dim::Int, atype=_atype, init=myinit)
-    mu_layer = Linear(input_dim, output_dim, atype, init)
-    logsigma_layer = Linear(input_dim, output_dim, atype, init)
+function QNet(input_dim::Int, output_dim::Int, atype=_atype, init=xavier)
+    mu_layer = Linear(input_dim, output_dim; atype=atype, init=init)
+    logsigma_layer = Linear(input_dim, output_dim; atype=atype, init=init)
     return QNet(mu_layer, logsigma_layer)
 end
 
@@ -124,6 +75,128 @@ function sample_noise(q::QNet, batchsize::Int; generation=false)
     end
     atype = typeof(value(q.mu_layer.w))
     return convert(atype, z)
+end
+
+
+#
+# Attention-related modules
+#
+
+
+mutable struct AttentionWindow
+    linear
+    A
+    B
+    N
+end
+
+
+function (l::AttentionWindow)(hdec)
+    ps = l.linear(hdec)
+    hsize, batchsize = size(ps)
+    gx, gy, logsigma2, logdelta, loggamma = map(
+        i->reshape(ps[i, :], 1, batchsize) , 1:hsize)
+    gx = div(l.A+1, 2) .* (gx .+ 1)
+    gy = div(l.B+1, 2) .* (gy .+ 1)
+    delta = div(max(l.A, l.B) - 1, (l.N - 1)) .* exp.(logdelta)
+    sigma2 = exp.(logsigma2)
+    gamma = exp.(loggamma)
+
+    Fx, Fy = filterbank(gx, gy, sigma2, delta, l.A, l.B, l.N)
+    return Fx, Fy, gamma
+end
+
+
+function AttentionWindow(input_dim::Int, A::Int, B::Int, N::Int; atype=_atype)
+    linear = Linear(input_dim, 5; atype=atype)
+    return AttentionWindow(linear, A, B, N)
+end
+
+
+function filterbank(gx, gy, sigma2, delta, A, B, N)
+    atype = typeof(value(gx)) <: KnetArray ? KnetArray : Array
+    etype = eltype(gx)
+    batchsize = size(gx, 2)
+
+    rng = reshape(atype{etype}(0:N-1), N, 1)
+    mu_x = compute_mu(gx, rng, delta, N)
+    mu_y = compute_mu(gy, rng, delta, N)
+
+    a = reshape(atype{etype}(0:A-1), A, 1, 1)
+    b = reshape(atype{etype}(0:B-1), B, 1, 1)
+
+    mu_x = reshape(mu_x, 1, size(mu_x)...)
+    mu_y = reshape(mu_y, 1, size(mu_y)...)
+    sig2 = reshape(sigma2, 1, 1, length(sigma2))
+
+    Fx = filterbank_matrices(a, mu_x, sig2)
+    Fy = filterbank_matrices(b, mu_y, sig2)
+
+    return Fx, Fy
+end
+
+
+function filterbank_matrices(xs, mu, sigma2; epsilon=1e-9)
+    y = xs .- mu
+    y = y ./ 2sigma2
+    y = exp.(-y .* y)
+    y = y ./ (sum(y, dims=1) .+ epsilon)
+end
+
+
+function compute_mu(g, rng, delta, N)
+    tmp = (rng .- 0.5 .- div(N, 2)) .* delta
+    mu = tmp .+ g
+end
+
+
+function filter_image(image, Fxt, Fy, gamma, A, B, N)
+    batchsize = size(image, 2)
+    img = reshape(image, A, B, batchsize)
+    glimpse = bmm(bmm(Fxt, img), Fy)
+    glimpse = reshape(glimpse, N, N, batchsize)
+    out = glimpse .* reshape(gamma, 1, 1, batchsize)
+    out = reshape(out, div(length(out), batchsize), batchsize)
+end
+
+
+mutable struct ReadAttention
+    window
+end
+
+
+function (l::ReadAttention)(x, xhat, hdec)
+    Fx, Fy, gamma = l.window(hdec)
+    A, B, N = l.window.A, l.window.B, l.window.N
+    Fxt = permutedims(Fx, (2, 1, 3))
+    xnew = filter_image(x, Fxt, Fy, gamma, A, B, N)
+    xhatnew = filter_image(xhat, Fxt, Fy, gamma, A, B, N)
+    return vcat(xnew, xhatnew)
+end
+
+
+mutable struct WriteAttention
+    window
+    linear
+end
+
+
+function (l::WriteAttention)(hdec)
+    A, B, N = l.window.A, l.window.B, l.window.N
+    batchsize = size(hdec, 2)
+    w = l.linear(hdec)
+    w = reshape(w, N, N, batchsize)
+    Fx, Fy, gamma = l.window(hdec)
+    Fyt = permutedims(Fy, (2, 1, 3))
+    wr = bmm(bmm(Fx, w), Fyt)
+    wr = reshape(wr, A*B, batchsize)
+    return wr ./ gamma
+end
+
+
+function WriteAttention(window, decoder_dim, N; atype=_atype)
+    linear = Linear(decoder_dim, N*N; atype=atype)
+    return WriteAttention(window, linear)
 end
 
 
@@ -164,8 +237,10 @@ mutable struct DRAW
     B
     N
     T
+    window
     read_layer
     write_layer
+    embed_layer
     qnetwork
     encoder
     decoder
@@ -175,13 +250,27 @@ mutable struct DRAW
 end
 
 
-function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
+function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
+              embed=0, nclass=10, atype=_atype, read_attn=true, write_attn=true)
     imgsize = A*B
-    read_layer = ReadNoAttention()
-    write_layer = WriteNoAttention(decoder_dim, imgsize, atype)
+
+    window = nothing
+    if read_attn || write_attn
+        window = AttentionWindow(decoder_dim, A, B, N; atype=atype)
+    end
+
+    read_layer = read_attn ? ReadAttention(window) : ReadNoAttention()
+    write_layer = nothing
+    if write_attn
+        write_layer = WriteAttention(window, decoder_dim, N; atype=atype)
+    else
+        write_layer = WriteNoAttention(decoder_dim, imgsize; atype=atype)
+    end
+
+    embed_layer = embed == 0 ? nothing : Embedding(nclass, embed; atype=atype)
     qnetwork = QNet(decoder_dim, noise_dim, atype)
-    encoder = RNN(2imgsize+decoder_dim, encoder_dim; dataType=_etype) # FIXME: adapt to attn
-    decoder = RNN(noise_dim, decoder_dim; dataType=_etype)
+    encoder = RNN(2*N*N+decoder_dim, encoder_dim; dataType=_etype) # FIXME: adapt to attn
+    decoder = RNN(noise_dim+embed, decoder_dim; dataType=_etype)
     encoder_hidden = []
     decoder_hidden = []
     state0 = atype(zeros(decoder.hiddenSize, 1))
@@ -191,8 +280,10 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
         B,
         N,
         T,
+        window,
         read_layer,
         write_layer,
+        embed_layer,
         qnetwork,
         encoder,
         decoder,
@@ -203,14 +294,16 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
 end
 
 
-function DRAW(N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
+function DRAW(N, T, encoder_dim, decoder_dim, noise_dim;
+              embed=0, nclass=10, atype=_atype, read_attn=true, write_atnn=true)
     A = B = N
-    return DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim, atype=_atype)
+    DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
+         embed=embed, atype=_atype, read_attn=read_attn, write_attn=write_attn)
 end
 
 
 # reconstruct
-function (model::DRAW)(x; cprev=_atype(zeros(size(x))))
+function (model::DRAW)(x, y=nothing; cprev=_atype(zeros(size(x))))
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
@@ -234,8 +327,14 @@ function (model::DRAW)(x; cprev=_atype(zeros(size(x))))
         # qnetwork
         z, mu, logsigma, sigma = model.qnetwork(henc)
 
+        input = z
+        if model.embed_layer != nothing
+            y == nothing && error("You should pass labels also.")
+            input = vcat(z, model.embed_layer(y))
+        end
+
         # decoder
-        model.decoder(z; hidden=model.decoder_hidden)
+        model.decoder(input; hidden=model.decoder_hidden)
         hdec, cdec = model.decoder_hidden
         hdec = reshape(hdec, size(hdec)[1:2])
 
@@ -249,14 +348,21 @@ end
 
 
 # generate
-function (model::DRAW)(batchsize::Int)
+function (model::DRAW)(batchsize::Int, y=nothing)
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
     for t = 1:model.T
         z = sample_noise(model, batchsize)
         c = t == 1 ? 0.0 : output.cs[end]
-        model.decoder(z; hidden=model.decoder_hidden)
+
+        input = z
+        if model.embed_layer != nothing
+            y == nothing && error("You should pass labels also.")
+            input = vcat(z, model.embed_layer(y))
+        end
+
+        model.decoder(input; hidden=model.decoder_hidden)
         hdec, cdec = model.decoder_hidden
         hdec = reshape(hdec, size(hdec)[1:2])
         wt = model.write_layer(hdec)
@@ -291,8 +397,8 @@ function binary_cross_entropy(x, x̂)
 end
 
 
-function loss(model::DRAW, x; loss_values=[])
-    output = model(x)
+function loss(model::DRAW, x, y=nothing; loss_values=[])
+    output = model(x, y)
     xhat = sigm.(output.cs[end])
     Lx = binary_cross_entropy(x, xhat) * model.A * model.B
     kl_terms = []
@@ -300,7 +406,7 @@ function loss(model::DRAW, x; loss_values=[])
         mu_2 = square(output.mus[t])
         sigma_2 = square(output.sigmas[t])
         logsigma = output.logsigmas[t]
-        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5# *model.T # FIXME: dimension kontrol
+        kl = 0.5 * sum((mu_2 + sigma_2-2logsigma), dims=1) .- 0.5 * model.T # FIXME: dimension kontrol
         push!(kl_terms, kl)
     end
     kl_sum = reduce(+, kl_terms) # == sum(kl_terms)
@@ -317,9 +423,9 @@ function init_opt!(model::DRAW, optimizer="Adam()")
 end
 
 
-function train!(model::DRAW, x)
+function train!(model::DRAW, x, y)
     values = []
-    J = @diff loss(model, x; loss_values=values)
+    J = @diff loss(model, x, y; loss_values=values)
     for par in params(model)
         g = grad(J, par)
         update!(value(par), g, par.opt)
@@ -332,11 +438,14 @@ function epoch!(model::DRAW, data)
     atype = typeof(value(model.qnetwork.mu_layer.w))
     Lx = Lz = 0.0
     iter = 0
-    for (x, y) in data
-        J1, J2 = train!(model, atype(reshape(x, 784, size(x,4))))
+    @time for (x, y) in data
+        J1, J2 = train!(model, atype(reshape(x, 784, size(x,4))), y)
         Lx += J1
         Lz += J2
         iter += 1
+        if iter % 100 == 0 || iter == 1
+            println("#$iter: Lx, Lz = $(Lx/iter), $(Lz/iter)")
+        end
     end
     lossval = Lx+Lz
     return lossval/iter, Lx/iter, Lz/iter
@@ -349,7 +458,7 @@ function validate(model::DRAW, data)
     iter = 0
     values = []
     for (x, y) in data
-        loss(model, atype(reshape(x, 784, size(x,4))); loss_values=values)
+        loss(model, atype(reshape(x, 784, size(x,4))), y; loss_values=values)
         J1, J2 = values
         Lx += J1
         Lz += J2
@@ -358,6 +467,19 @@ function validate(model::DRAW, data)
     end
     lossval = Lx + Lz
     return lossval/iter, Lx/iter, Lz/iter
+end
+
+
+function mnistgrid(images, nrow, filename=nothing)
+    yy = reshape(images, 28, 28, 1, size(images)[end])
+    yy = permutedims(yy, (2,1,3,4))
+    yy = Images.imresize(yy, 40, 40)
+    yy = Gray.(mosaicview(yy, 0.5, nrow=nrow, npad=1, rowmajor=true))
+    if filename == nothing
+        display(yy)
+    else
+        save(filename, yy)
+    end
 end
 
 
@@ -370,8 +492,9 @@ function parse_options(args)
         #  help="array and float type to use")
         ("--batchsize"; arg_type=Int; default=64; help="batch size")
         ("--zdim"; arg_type=Int; default=10; help="noise dimension")
-        ("--encoder_dim"; arg_type=Int; default=256; help="hidden units")
-        ("--decoder_dim"; arg_type=Int; default=256; help="hidden units")
+        ("--encoder"; arg_type=Int; default=256; help="hidden units")
+        ("--decoder"; arg_type=Int; default=256; help="hidden units")
+        ("--embed"; arg_type=Int; default=100; help="condition dimension")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
@@ -381,8 +504,9 @@ function parse_options(args)
         ("--outdir"; default=nothing; help="output dir for models/generations")
         ("--A"; arg_type=Int; default=28)
         ("--B"; arg_type=Int; default=28)
-        ("--N"; arg_type=Int; default=28)
+        ("--N"; arg_type=Int; default=5)
         ("--T"; arg_type=Int; default=10)
+        ("--valid"; action=:store_true)
     end
 
     isa(args, AbstractString) && (args=split(args))
@@ -403,8 +527,8 @@ function main(args)
     display(o)
 
     model = DRAW(
-        o[:A], o[:B], o[:N], o[:T], o[:encoder_dim],
-        o[:decoder_dim], o[:zdim])
+        o[:A], o[:B], o[:N], o[:T], o[:encoder],
+        o[:decoder], o[:zdim]; embed=o[:embed])
     println("model initialized"); flush(stdout)
     init_opt!(model, o[:optim])
     println("optimization parameters initiazlied"); flush(stdout)
@@ -414,7 +538,7 @@ function main(args)
     bestloss = Inf
     for epoch = 1:o[:epochs]
         trnloss = epoch!(model, dtrn)
-        tstloss = validate(model, dtst)
+        tstloss = o[:valid] ? validate(model, dtst) : (.0, .0, .0)
         report(epoch, trnloss, tstloss)
         if tstloss[1] < bestloss
             bestloss = tstloss[1]
@@ -424,11 +548,9 @@ function main(args)
 end
 
 
-function report(epoch, trn, tst)
-    trnloss, trnLx, trnLz = trn
-    tstloss, tstLx, tstLz = tst
-    datetime = now()
-    print("epoch=$epoch, trn=$trnloss (Lx=$trnLx, Lz=$trnLz)")
-    println(", tst=$tstloss (Lx=$tstLx, Lz=$tstLz)")
+function report(epoch, trn, tst=nothing)
+    print("[$(now())] epoch=$epoch, trn=$trn")
+    if tst != nothing; println(", tst=$tst")
+    else; println(); end
     flush(stdout)
 end
