@@ -1,5 +1,6 @@
 module DRAW
 
+
 using Knet, Sloth
 import Knet: minibatch, params, train!
 using Statistics, Random, Dates
@@ -22,5 +23,6 @@ include("layers.jl")
 include("network.jl")
 include("visualize.jl")
 include("train.jl")
+
 
 end # module
