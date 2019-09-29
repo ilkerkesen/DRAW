@@ -1,4 +1,4 @@
-mutable struct DRAW
+mutable struct Network
     A
     B
     N
@@ -12,11 +12,10 @@ mutable struct DRAW
     decoder
     encoder_hidden
     decoder_hidden
-    state0
 end
 
 
-function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
+function Network(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
               embed=0, nclass=10, atype=_atype, read_attn=true, write_attn=true)
     imgsize = A*B
 
@@ -39,9 +38,8 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
     decoder = RNN(noise_dim+embed, decoder_dim; dataType=_etype)
     encoder_hidden = []
     decoder_hidden = []
-    state0 = atype(zeros(decoder.hiddenSize, 1))
 
-    return DRAW(
+    return Network(
         A,
         B,
         N,
@@ -54,22 +52,21 @@ function DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
         encoder,
         decoder,
         encoder_hidden,
-        decoder_hidden,
-        state0
+        decoder_hidden
     )
 end
 
 
-function DRAW(N, T, encoder_dim, decoder_dim, noise_dim;
+function Network(N, T, encoder_dim, decoder_dim, noise_dim;
               embed=0, nclass=10, atype=_atype, read_attn=true, write_atnn=true)
     A = B = N
-    DRAW(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
+    Network(A, B, N, T, encoder_dim, decoder_dim, noise_dim;
          embed=embed, atype=_atype, read_attn=read_attn, write_attn=write_attn)
 end
 
 
 # reconstruct
-function (model::DRAW)(x, y=nothing; cprev=_atype(zeros(size(x))))
+function (model::Network)(x, y=nothing; cprev=_atype(zeros(size(x))))
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
@@ -77,7 +74,8 @@ function (model::DRAW)(x, y=nothing; cprev=_atype(zeros(size(x))))
 
     hdec = get_hdec(model, x)
     hinit = reshape(hdec, size(hdec,1), size(hdec,2), 1)
-    push!(model.decoder_hidden, hinit, hinit)
+    model.decoder.h, model.decoder.c = hinit, 0.0f0
+    model.encoder.h = model.encoder.c = 0.0f0
     for t = 1:model.T
         # update xhat and then read
         xhat = x - sigm.(cprev)
@@ -86,8 +84,8 @@ function (model::DRAW)(x, y=nothing; cprev=_atype(zeros(size(x))))
         # encoder
         input = vcat(rt, hdec)
         input = reshape(input, size(input, 1), size(input, 2), 1)
-        model.encoder(input; hidden=model.encoder_hidden)
-        henc, cenc = model.encoder_hidden
+        model.encoder(input)
+        henc = model.encoder.h
         henc = reshape(henc, size(henc)[1:2])
 
         # qnetwork
@@ -100,8 +98,8 @@ function (model::DRAW)(x, y=nothing; cprev=_atype(zeros(size(x))))
         end
 
         # decoder
-        model.decoder(input; hidden=model.decoder_hidden)
-        hdec, cdec = model.decoder_hidden
+        model.decoder(input)
+        hdec = model.decoder.h
         hdec = reshape(hdec, size(hdec)[1:2])
 
         # write and update draw output
@@ -114,7 +112,7 @@ end
 
 
 # generate
-function (model::DRAW)(batchsize::Int, y=nothing)
+function (model::Network)(batchsize::Int, y=nothing)
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
@@ -143,15 +141,13 @@ function (model::DRAW)(batchsize::Int, y=nothing)
 end
 
 
-function get_hdec(model::DRAW, x)
-    h = model.state0
-    batchsize = size(x, 2)
-    h = h .+ fill!(similar(value(h), length(h), batchsize), 0)
-    return h
+function get_hdec(model::Network, x)
+    num_hidden, batchsize = model.decoder.hiddenSize, size(x, 2)
+    h = _atype(zeros(num_hidden, batchsize))
 end
 
 
-function sample_noise(model::DRAW, batchsize::Int)
+function sample_noise(model::Network, batchsize::Int)
     return sample_noise(model.qnetwork, batchsize; generation=true)
 end
 
@@ -163,7 +159,7 @@ function binary_cross_entropy(x, x̂)
 end
 
 
-function loss(model::DRAW, x, y=nothing; loss_values=[])
+function loss(model::Network, x, y=nothing; loss_values=[])
     output = model(x, y)
     xhat = sigm.(output.cs[end])
     Lx = binary_cross_entropy(x, xhat) * model.A * model.B
@@ -177,12 +173,12 @@ function loss(model::DRAW, x, y=nothing; loss_values=[])
     end
     kl_sum = reduce(+, kl_terms) # == sum(kl_terms)
     Lz = mean(kl_sum)
-    push!(loss_values, value.(Lx), value.(Lz))
+    push!(loss_values, value(Lx), value(Lz))
     return Lx + Lz
 end
 
 
-function init_opt!(model::DRAW, optimizer="Adam()")
+function init_opt!(model::Network, optimizer="Adam()")
     for par in params(model)
         par.opt = eval(Meta.parse(optimizer))
     end

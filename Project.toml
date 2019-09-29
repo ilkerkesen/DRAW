@@ -2,3 +2,16 @@ name = "DRAW"
 uuid = "7e16b5a0-e062-11e9-3467-b7e39d9ee233"
 authors = ["Ilker Kesen <ilkerksn@gmail.com>"]
 version = "0.1.0"
+
+[deps]
+ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+ImageMagick = "6218d12a-5da1-5696-b52f-db25d2ecc6d1"
+Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+Knet = "1902f260-5fb4-5aff-8c31-6271790ab950"
+MosaicViews = "e94cdb99-869f-56ef-bcf0-1ae2bcbe0389"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Sloth = "599f0d3e-fa5b-11e8-3d5f-e1ebc21cfa8f"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"

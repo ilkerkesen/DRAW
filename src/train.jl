@@ -1,4 +1,4 @@
-function train!(model::DRAW, x, y)
+function train!(model::Network, x, y)
     values = []
     J = @diff loss(model, x, y; loss_values=values)
     for par in params(model)
@@ -9,7 +9,7 @@ function train!(model::DRAW, x, y)
 end
 
 
-function epoch!(model::DRAW, data)
+function epoch!(model::Network, data)
     atype = typeof(value(model.qnetwork.mu_layer.w))
     Lx = Lz = 0.0f0
     iter = 0
@@ -27,7 +27,7 @@ function epoch!(model::DRAW, data)
 end
 
 
-function validate(model::DRAW, data)
+function validate(model::Network, data)
     atype = typeof(value(model.qnetwork.mu_layer.w))
     Lx = Lz = 0.0f0
     iter = 0
@@ -60,7 +60,7 @@ function parse_options(args)
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
-        ("--gridscale"; arg_type=Float64; default=2.0f0)
+        ("--gridscale"; arg_type=Float32; default=2.0f0)
         ("--optim"; default="Adam(;beta1=0.5f0, gclip=5.0f0)")
         ("--loadfile"; default=nothing; help="file to load trained models")
         ("--outdir"; default=nothing; help="output dir for models/generations")
@@ -81,14 +81,14 @@ function parse_options(args)
 end
 
 
-function main(args)
+function train(args)
     println("script started"); flush(stdout)
     o = parse_options(args)
     o[:seed] > 0 && Knet.seed!(o[:seed])
     println("options parsed"); flush(stdout)
     display(o)
 
-    model = DRAW(
+    model = Network(
         o[:A], o[:B], o[:N], o[:T], o[:encoder],
         o[:decoder], o[:zdim]; embed=o[:embed])
     println("model initialized"); flush(stdout)
