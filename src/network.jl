@@ -116,6 +116,7 @@ function (model::Network)(batchsize::Int, y=nothing)
     empty!(model.encoder_hidden)
     empty!(model.decoder_hidden)
     output = DRAWOutput()
+    model.decoder.h = model.decoder.c = 0.0f0
     for t = 1:model.T
         z = sample_noise(model, batchsize)
         c = t == 1 ? 0.0f0 : output.cs[end]
@@ -126,8 +127,8 @@ function (model::Network)(batchsize::Int, y=nothing)
             input = vcat(z, model.embed_layer(y))
         end
 
-        model.decoder(input; hidden=model.decoder_hidden)
-        hdec, cdec = model.decoder_hidden
+        model.decoder(input)
+        hdec = model.decoder.h
         hdec = reshape(hdec, size(hdec)[1:2])
         wt = model.write_layer(hdec)
         c = c .+ wt

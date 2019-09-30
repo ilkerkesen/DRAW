@@ -18,9 +18,6 @@ function epoch!(model::Network, data)
         Lx += J1
         Lz += J2
         iter += 1
-        if iter % 100 == 0 || iter == 1
-            println("#$iter: Lx, Lz = $(Lx/iter), $(Lz/iter)")
-        end
     end
     lossval = Lx+Lz
     return lossval/iter, Lx/iter, Lz/iter
